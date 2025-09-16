@@ -59,11 +59,13 @@ sequenceDiagram
   participant AS as AuthServer
 
   SPA->>AS: POST /connect/token (grant_type=refresh_token, RT_old)
-  alt Valid & not revoked
-    AS->>AS: Revoke RT_old; issue RT_new
+
+  alt RT_old is valid
+    AS->>AS: Revoke RT_old
+    AS->>AS: Issue RT_new
     AS-->>SPA: 200 {access_token, refresh_token=RT_new}
-  else Reuse attempt
-    AS->>AS: Revoke family
+  else RT_old was reused
+    AS->>AS: Revoke entire family
     AS-->>SPA: 400 {error:"invalid_grant"}
   end
 ```
