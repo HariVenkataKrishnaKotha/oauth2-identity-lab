@@ -14,17 +14,17 @@ public static class DbSeeder
             db.ResourceOwners.Add(new ResourceOwner { Username = "alice", PasswordHash = uHash, PasswordSalt = uSalt });
         }
 
-        if (!db.OAuthClients.Any(c => c.ClientId == "svc-weather-reporter"))
+        if (!db.OAuthClients.Any(c => c.ClientId == "demo-spa"))
         {
             var (hash, salt) = AuthServer.Security.SecretHasher.Hash("svc-secret-very-strong");
             db.OAuthClients.Add(new OAuthClient
             {
-                ClientId = "svc-weather-reporter",
+                ClientId = "demo-spa",
                 ClientSecretHash = hash,
                 ClientSecretSalt = salt,
                 IsConfidential = true,
                 DisplayName = "Weather Reporter Service",
-                RedirectUrisJson = "[]", // not used for client_credentials
+                RedirectUrisJson = "localhost:4200/callback", // not used for client_credentials
                 AllowedScopesJson = System.Text.Json.JsonSerializer.Serialize(new[] { "weather.read" })
             });
             await db.SaveChangesAsync();

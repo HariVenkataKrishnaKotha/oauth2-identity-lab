@@ -9,11 +9,15 @@ public static class DiscoveryEndpoints
 {
     public static void MapDiscovery(this IEndpointRouteBuilder app)
     {
+        const string SpaCors = "SpaCors";
+
         app.MapGet("/oauth/.well-known/jwks.json", GetJwks)
-           .WithTags("Discovery");
+           .WithTags("Discovery")
+           .RequireCors(SpaCors); // ensure CORS headers on this route
 
         app.MapGet("/oauth/.well-known/openid-configuration", GetConfig)
-           .WithTags("Discovery");
+           .WithTags("Discovery")
+           .RequireCors(SpaCors); // ensure CORS headers on this route
     }
 
     private static IResult GetJwks([FromServices] SecurityKey pubKey)
@@ -40,8 +44,7 @@ public static class DiscoveryEndpoints
 
     private static IResult GetConfig(HttpContext ctx)
     {
-        // Must match OAuthTokenOptions.Issuer (Program.cs registration)
-        var issuer = "http://localhost:5018";
+        var issuer = "http://localhost:5018"; // <- MUST match Program.cs OAuthTokenOptions.Issuer
 
         var meta = new
         {
@@ -49,8 +52,6 @@ public static class DiscoveryEndpoints
             authorization_endpoint = $"{issuer}/connect/authorize",
             token_endpoint = $"{issuer}/connect/token",
             jwks_uri = $"{issuer}/oauth/.well-known/jwks.json",
-
-            // Simple capability set for our server
             response_types_supported = new[] { "code" },
             grant_types_supported = new[] { "authorization_code", "client_credentials", "refresh_token" },
             token_endpoint_auth_methods_supported = new[] { "client_secret_basic", "client_secret_post" },

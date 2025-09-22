@@ -1,112 +1,67 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Authorization;
+using AuthServer.Endpoints;
+using AuthServer.Infrastructure;
+using AuthServer.Logic;
+using AuthServer.Security;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using ResourceApi.Security;
-using ResourceApi.Services;
-using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ---- MUST mirror AuthServer ----
-var issuer = "http://localhost:5018";
-var audience = "resource-api";
-var jwksUri = $"{issuer}/oauth/.well-known/jwks.json";
-var realm = "resource-api"; // RFC 6750 realm value
-
-// ---- JWKS provider + refresher ----
-builder.Services.AddHttpClient<JwksProvider>();
-builder.Services.AddSingleton(sp =>
+// --- Eager-create keys ---
 {
-    var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient();
-    return new JwksProvider(http, jwksUri);
-});
-builder.Services.AddHostedService<JwksRefreshService>();
+    var keysDir = Path.Combine(builder.Environment.ContentRootPath, "keys");
+    var store = new RsaKeyStore(keysDir);
+    store.GetOrCreate();
+    Console.WriteLine($"[AuthServer] Keys directory: {keysDir}");
+}
 
-// ---- AuthN with RFC6750-compliant events ----
-builder.Services
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(o =>
-    {
-        o.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = issuer,
-            ValidateAudience = true,
-            ValidAudience = audience,
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKeyResolver = (token, st, kid, p) =>
-            {
-                // Resolve keys from cache (supports rotation by kid)
-                var provider = builder.Services.BuildServiceProvider().GetRequiredService<JwksProvider>();
-                var keys = provider.Resolve(kid);
-                return keys.Any() ? keys : provider.GetAllKeys();
-            },
-            ValidateLifetime = true,
-            ClockSkew = TimeSpan.FromSeconds(30)
-        };
-
-        // RFC 6750 error mapping
-        o.Events = new JwtBearerEvents
-        {
-            OnChallenge = async ctx =>
-            {
-                // Suppress default HTML response
-                ctx.HandleResponse();
-
-                // No token or invalid token
-                var (error, desc) = BearerErrors.FromAuthenticateFailure(ctx.AuthenticateFailure);
-
-                // Build RFC 6750 WWW-Authenticate header
-                var www = BearerErrors.BuildWwwAuthenticate(realm, error, desc);
-
-                ctx.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                ctx.Response.Headers["WWW-Authenticate"] = www;
-                BearerErrors.ApplyNoStore(ctx.Response);
-
-                await ctx.Response.WriteAsJsonAsync(new { error, error_description = desc });
-            },
-            OnForbidden = async ctx =>
-            {
-                // Authorization failed (typically insufficient scope)
-                // Try to read required scopes metadata from endpoint
-                var endpoint = ctx.HttpContext.GetEndpoint();
-                var requiredScopes = endpoint?.Metadata.GetMetadata<RequiredScopesMetadata>()?.Scopes ?? Array.Empty<string>();
-
-                var error = "insufficient_scope";
-                var desc = requiredScopes.Length > 0
-                    ? $"Required scope: {string.Join(' ', requiredScopes)}."
-                    : "The request requires higher privileges than provided by the access token.";
-
-                var www = BearerErrors.BuildWwwAuthenticate(realm, error, desc, requiredScopes);
-
-                ctx.Response.StatusCode = (int)HttpStatusCode.Forbidden;
-                ctx.Response.Headers["WWW-Authenticate"] = www;
-                BearerErrors.ApplyNoStore(ctx.Response);
-
-                await ctx.Response.WriteAsJsonAsync(new { error, error_description = desc, scope = requiredScopes.Length > 0 ? string.Join(' ', requiredScopes) : null });
-            }
-        };
-    });
-
-// ---- AuthZ using a dedicated Scope requirement ----
-builder.Services.AddAuthorization(o =>
-{
-    o.AddPolicy("scope:weather.read", p => p.AddRequirements(new ScopeRequirement("weather.read")));
-});
-builder.Services.AddSingleton<IAuthorizationHandler, ScopeRequirementHandler>();
-
-// ---- CORS for SPA ----
+// --- CORS ---
 const string SpaCors = "SpaCors";
 builder.Services.AddCors(opts =>
 {
     opts.AddPolicy(SpaCors, p => p
-        .WithOrigins("http://localhost:4200")
+        .WithOrigins("http://localhost:4200", "http://127.0.0.1:4200")
         .AllowAnyHeader()
-        .AllowAnyMethod());
+        .AllowAnyMethod()
+        // You can keep this on or remove; it’s fine either way for simple fetches:
+        .AllowCredentials()
+    );
 });
 
+// --- EF Core ---
+builder.Services.AddDbContext<AuthDbContext>(opt =>
+    opt.UseSqlServer(builder.Configuration.GetConnectionString("AuthDb")));
+
+// --- Swagger ---
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+// --- Keys + Token options ---
+builder.Services.AddSingleton<SigningCredentials>(sp =>
+{
+    var env = sp.GetRequiredService<IHostEnvironment>();
+    var store = new RsaKeyStore(Path.Combine(env.ContentRootPath, "keys"));
+    var (priv, _) = store.GetOrCreate();
+    return new SigningCredentials(new RsaSecurityKey(priv) { KeyId = "dev-rsa-1" }, SecurityAlgorithms.RsaSha256);
+});
+builder.Services.AddSingleton<SecurityKey>(sp =>
+{
+    var env = sp.GetRequiredService<IHostEnvironment>();
+    var store = new RsaKeyStore(Path.Combine(env.ContentRootPath, "keys"));
+    var (_, pub) = store.GetOrCreate();
+    return new RsaSecurityKey(pub) { KeyId = "dev-rsa-1" };
+});
+
+// IMPORTANT: issuer must match the port you’re actually using (5018 per your error)
+builder.Services.AddSingleton(new OAuthTokenOptions
+{
+    Issuer = "http://localhost:5018",
+    Audience = "resource-api",
+    AccessTokenLifetime = TimeSpan.FromMinutes(10),
+    RefreshTokenLifetime = TimeSpan.FromDays(30)
+});
+
+builder.Services.AddScoped<TokenService>();
 
 var app = builder.Build();
 
@@ -116,15 +71,22 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+// CORS MUST run before endpoints
 app.UseCors(SpaCors);
-app.UseAuthentication();
-app.UseAuthorization();
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok", role = "ResourceServer" }));
+// --- DB migrate + seed ---
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
+    await db.Database.MigrateAsync();
+    await DbSeeder.SeedAsync(db);
+}
 
-// Attach required scope metadata so OnForbidden can advertise it per RFC 6750
-app.MapGet("/api/weather", () => Results.Ok(new { tempC = 24, summary = "Sunny" }))
-   .WithMetadata(new RequiredScopesMetadata("weather.read"))
-   .RequireAuthorization("scope:weather.read");
+// --- Endpoints ---
+app.MapGet("/health", () => Results.Ok(new { status = "ok", role = "AuthorizationServer" }));
+app.MapAuthorize();
+app.MapToken();
+app.MapAdminClients();
+app.MapDiscovery(); // Discovery endpoints (see below)
 
 app.Run();

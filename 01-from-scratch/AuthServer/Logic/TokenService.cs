@@ -128,6 +128,7 @@ public sealed class TokenService
 
         var handler = new JwtSecurityTokenHandler();
         var token = handler.CreateToken(descriptor);
+        var s = handler.WriteToken(token); // for debugging: can use https://jwt.io to decode/verify with the public key
         return (handler.WriteToken(token), new DateTimeOffset(exp));
     }
 
