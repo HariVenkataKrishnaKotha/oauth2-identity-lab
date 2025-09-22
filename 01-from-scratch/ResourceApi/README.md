@@ -1,6 +1,6 @@
 # ResourceApi — OAuth 2.0 Protected Resource
 
-This project implements the **Resource Server** role in OAuth 2.0, built with .NET 6.  
+This project implements the **Resource Server** role in OAuth 2.0, built with .NET 9.  
 It validates JWT access tokens against AuthServer’s JWKS and enforces scopes according to RFC 6750.
 
 ---
