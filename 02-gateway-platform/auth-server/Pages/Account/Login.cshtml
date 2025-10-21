@@ -1,0 +1,23 @@
+﻿@page
+@model AuthServer.Pages.Account.LoginModel
+@{
+    Layout = "/Pages/Shared/_Layout.cshtml";
+    ViewData["Title"] = "Sign in";
+}
+<h2>Manager Sign in</h2>
+<form method="post">
+    <div>
+        <label>Email</label>
+        <input type="email" name="Email" required />
+    </div>
+    <div>
+        <label>Password</label>
+        <input type="password" name="Password" required />
+    </div>
+    <button type="submit">Sign in</button>
+    <input type="hidden" name="ReturnUrl" value="@Model.ReturnUrl" />
+</form>
+@if (!string.IsNullOrEmpty(Model.Error))
+{
+    <p style="color:red">@Model.Error</p>
+}

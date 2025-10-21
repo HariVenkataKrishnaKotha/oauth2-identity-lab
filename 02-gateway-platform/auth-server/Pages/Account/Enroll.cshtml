@@ -1,0 +1,17 @@
+﻿@page
+@model AuthServer.Pages.Account.EnrollModel
+@{
+    Layout = "/Pages/Shared/_Layout.cshtml";
+    ViewData["Title"] = "Create your account";
+}
+<h2>Create your account</h2>
+<form method="post">
+    <div><label>Email (username)</label><input type="email" name="Email" required /></div>
+    <div><label>Password</label><input type="password" name="Password" required /></div>
+    <button type="submit">Save & Continue</button>
+    <input type="hidden" name="ReturnUrl" value="@Model.ReturnUrl" />
+</form>
+@if (!string.IsNullOrEmpty(Model.Error))
+{
+    <p style="color:red">@Model.Error</p>
+}
