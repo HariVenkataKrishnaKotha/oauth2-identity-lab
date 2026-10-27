@@ -1,0 +1,15 @@
+# IDE and OS
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
+
+# The Angular SPA lives in its own repo (oauth2-pkce-angular-client)
+**/client-spa/
+
+# Local secrets never belong in git
+appsettings.*.local.json
+*.pfx
+.env
