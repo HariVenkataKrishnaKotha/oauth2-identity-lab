@@ -154,22 +154,44 @@ app.MapGet("/test-token", async (HttpContext ctx, IConfiguration config) =>
     });
 });
 
-// Auth middleware: validate Authorization Bearer ONLY for /api/** routes
+// Paths the gateway lets through WITHOUT a Bearer token. Everything else,
+// including every resource-api route, must carry a valid access token.
+//
+// Exact matches only:
+// - /onboarding/identify, /onboarding/magic: auth-server passwordless entry
+//   points. They run before the onboardee has any token (identify checks
+//   last name + DOB, magic redeems the one-time link and sets the cookie).
+// - /health/live, /health/ready: the gateway's own probes.
+string[] publicExactPaths =
+[
+    "/onboarding/identify",
+    "/onboarding/magic",
+    "/health/live",
+    "/health/ready"
+];
+
+// Segment-bounded prefixes for auth-server namespaces that authenticate
+// callers themselves (cookie, client credentials or PKCE), so a Bearer
+// token cannot be required here:
+// - /connect/ (authorize, token, introspect, userinfo)
+// - /Account/ (login and enrollment pages)
+// - /.well-known/ (discovery document and JWKS)
+string[] publicPathPrefixes =
+[
+    "/connect/",
+    "/Account/",
+    "/.well-known/"
+];
+
+// Auth middleware: validate the Authorization Bearer token for every
+// non-public path before it is proxied
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path.Value ?? "";
 
-    // These paths are PUBLIC (no Bearer token required):
-    // - /connect/** (OAuth endpoints use cookies, not Bearer tokens)
-    // - /Account/** (login/enrollment pages)
-    // - /onboarding/** (passwordless entry points)
-    // - /.well-known/** (discovery endpoints)
-    // - /health/** (health checks)
-    var isPublicPath = path.StartsWith("/connect", StringComparison.OrdinalIgnoreCase) ||
-                       path.StartsWith("/Account", StringComparison.OrdinalIgnoreCase) ||
-                       path.StartsWith("/onboarding", StringComparison.OrdinalIgnoreCase) ||
-                       path.StartsWith("/.well-known", StringComparison.OrdinalIgnoreCase) ||
-                       path.StartsWith("/health", StringComparison.OrdinalIgnoreCase);
+    var isPublicPath =
+        publicExactPaths.Any(p => string.Equals(path, p, StringComparison.OrdinalIgnoreCase)) ||
+        publicPathPrefixes.Any(p => path.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
     if (isPublicPath)
     {
@@ -178,7 +200,7 @@ app.Use(async (ctx, next) =>
         return;
     }
 
-    // For /api/** routes, require Bearer token
+    // Everything else (including all resource-api routes) requires a Bearer token
     var authz = ctx.Request.Headers.Authorization.ToString();
     var token = authz.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
         ? authz.Substring("Bearer ".Length).Trim()
