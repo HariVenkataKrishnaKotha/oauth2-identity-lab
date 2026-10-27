@@ -24,7 +24,8 @@ public static class DbSeeder
                 ClientSecretSalt = salt,
                 IsConfidential = true,
                 DisplayName = "Weather Reporter Service",
-                RedirectUrisJson = "localhost:4200/callback", // not used for client_credentials
+                // JSON string array; AuthorizeEndpoint parses it with JsonSerializer.Deserialize<string[]>
+                RedirectUrisJson = System.Text.Json.JsonSerializer.Serialize(new[] { "http://localhost:4200/callback" }),
                 AllowedScopesJson = System.Text.Json.JsonSerializer.Serialize(new[] { "weather.read" })
             });
             await db.SaveChangesAsync();
