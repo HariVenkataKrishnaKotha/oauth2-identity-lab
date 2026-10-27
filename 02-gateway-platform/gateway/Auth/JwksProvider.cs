@@ -1,7 +1,6 @@
-﻿using System.Net.Http.Json;
-using System.Text.Json;
-using Microsoft.Extensions.Caching.Distributed;
+﻿using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.IdentityModel.Tokens;
+using System.Text.Json;
 
 namespace Gateway.Auth;
 
@@ -11,69 +10,66 @@ public interface IJwksProvider
     Task InvalidateAsync(CancellationToken ct);
 }
 
-public sealed class JwksProvider : IJwksProvider
+public class JwksProvider : IJwksProvider
 {
-    private readonly IHttpClientFactory _http;
+    private readonly HttpClient _httpClient;
+    private readonly IConfiguration _config;
     private readonly IDistributedCache _cache;
-    private readonly ILogger<JwksProvider> _log;
-    private readonly string _jwksUri;
-    private readonly string _cacheKey;
-    private readonly IConfiguration _configuration;
+    private readonly ILogger<JwksProvider> _logger;
+    private const string CacheKey = "jwks";
+    private static readonly TimeSpan CacheDuration = TimeSpan.FromHours(1);
 
-    private JsonWebKeySet? _memory; // short-circuit for the process
-    private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
-
-    public JwksProvider(IHttpClientFactory http, IDistributedCache cache, IConfiguration cfg, ILogger<JwksProvider> log)
+    public JwksProvider(
+        HttpClient httpClient,
+        IConfiguration config,
+        IDistributedCache cache,
+        ILogger<JwksProvider> logger)
     {
-        _http = http;
+        _httpClient = httpClient;
+        _config = config;
         _cache = cache;
-        _log = log;
-        _configuration = cfg;
-        _jwksUri = cfg["Gateway:JwksUri"] ?? throw new InvalidOperationException("Gateway:JwksUri missing");
-        _cacheKey = cfg["Redis:JwksCacheKey"] ?? "jwks:cache";
+        _logger = logger;
     }
 
     public async Task<JsonWebKeySet> GetAsync(CancellationToken ct)
     {
-        if (_memory is not null) return _memory;
-
-        // Try Redis
-        var cached = await _cache.GetStringAsync(_cacheKey, ct);
-        if (!string.IsNullOrWhiteSpace(cached))
+        // Try cache first
+        var cached = await _cache.GetStringAsync(CacheKey, ct);
+        if (!string.IsNullOrEmpty(cached))
         {
-            try
-            {
-                _memory = new JsonWebKeySet(cached);
-                return _memory;
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "Failed to parse JWKS from cache; refetching");
-            }
+            _logger.LogDebug("JWKS retrieved from cache");
+            return new JsonWebKeySet(cached);
         }
 
-        // Fetch fresh
-        var http = _http.CreateClient("jwks");
-        using var resp = await http.GetAsync(_jwksUri, ct);
-        resp.EnsureSuccessStatusCode();
-        var json = await resp.Content.ReadAsStringAsync(ct);
-
-        _memory = new JsonWebKeySet(json);
-
-        var ttlSeconds = int.TryParse(
-    _configuration["Redis:JwksCacheSeconds"], out var s) ? Math.Clamp(s, 15, 300) : 60;
-
-        await _cache.SetStringAsync(_cacheKey, json, new DistributedCacheEntryOptions
+        // Fetch from server
+        var jwksUri = _config["Gateway:JwksUri"];
+        if (string.IsNullOrEmpty(jwksUri))
         {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(ttlSeconds)
-        }, ct);
+            throw new InvalidOperationException("Gateway:JwksUri not configured");
+        }
 
-        return _memory;
+        _logger.LogInformation("Fetching JWKS from {Uri}", jwksUri);
+
+        var response = await _httpClient.GetAsync(jwksUri, ct);
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadAsStringAsync(ct);
+
+        // Cache it
+        var cacheOptions = new DistributedCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = CacheDuration
+        };
+        await _cache.SetStringAsync(CacheKey, json, cacheOptions, ct);
+
+        _logger.LogInformation("JWKS cached for {Duration}", CacheDuration);
+
+        return new JsonWebKeySet(json);
     }
 
     public async Task InvalidateAsync(CancellationToken ct)
     {
-        _memory = null;
-        await _cache.RemoveAsync(_cacheKey, ct);
+        await _cache.RemoveAsync(CacheKey, ct);
+        _logger.LogInformation("JWKS cache invalidated");
     }
 }

@@ -13,15 +13,22 @@ public interface IIntrospectionClient
 
 public sealed class IntrospectionClient : IIntrospectionClient
 {
-    private readonly IHttpClientFactory _http;
+    private readonly HttpClient _httpClient;
     private readonly IDistributedCache _cache;
     private readonly IConfiguration _cfg;
     private readonly ILogger<IntrospectionClient> _log;
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    public IntrospectionClient(IHttpClientFactory http, IDistributedCache cache, IConfiguration cfg, ILogger<IntrospectionClient> log)
+    public IntrospectionClient(
+        HttpClient httpClient,
+        IDistributedCache cache,
+        IConfiguration cfg,
+        ILogger<IntrospectionClient> log)
     {
-        _http = http; _cache = cache; _cfg = cfg; _log = log;
+        _httpClient = httpClient;
+        _cache = cache;
+        _cfg = cfg;
+        _log = log;
     }
 
     public async Task<(bool active, ClaimsPrincipal? principal, string? error)> IntrospectAsync(string token, CancellationToken ct)
@@ -38,8 +45,7 @@ public sealed class IntrospectionClient : IIntrospectionClient
         var clientId = _cfg["Gateway:Introspection:ClientId"]!;
         var clientSecret = _cfg["Gateway:Introspection:ClientSecret"]!;
 
-        var http = _http.CreateClient("introspection");
-        http.DefaultRequestHeaders.Authorization =
+        _httpClient.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Basic",
                 Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}")));
 
@@ -48,7 +54,7 @@ public sealed class IntrospectionClient : IIntrospectionClient
             new KeyValuePair<string,string>("token", token)
         });
 
-        using var resp = await http.PostAsync(endpoint, content, ct);
+        using var resp = await _httpClient.PostAsync(endpoint, content, ct);
         if (!resp.IsSuccessStatusCode)
         {
             _log.LogWarning("Introspection HTTP {Status}", resp.StatusCode);

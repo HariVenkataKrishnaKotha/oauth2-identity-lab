@@ -1,36 +1,54 @@
-using Gateway.Auth;
+﻿using Gateway.Auth;
 using Gateway.Infrastructure;
 using Gateway.Policies;
 using Gateway.Transforms;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.Extensions.Caching.StackExchangeRedis;
-using Microsoft.Extensions.Logging;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using StackExchange.Redis;
 using System.Net;
-using System.Security.Claims;
 using Yarp.ReverseProxy.Forwarder;
-
 
 var builder = WebApplication.CreateBuilder(args);
 var cfg = builder.Configuration;
 
-// Redis: multiplexer + distributed cache
+// SERVICE REGISTRATION
+
+// Redis: multiplexer + distributed cache (Local instance)
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
-    ConnectionMultiplexer.Connect(cfg["Redis:Configuration"] ?? "localhost:6379"));
+    ConnectionMultiplexer.Connect(cfg["Redis:Configuration"]!));
+
 builder.Services.AddStackExchangeRedisCache(opt =>
 {
-    opt.Configuration = cfg["Redis:Configuration"] ?? "localhost:6379";
+    opt.Configuration = cfg["Redis:Configuration"];
 });
+
 builder.Services.AddSingleton<IRedisRateLimiter, RedisRateLimiter>();
-builder.Services.AddSingleton<IForwarderHttpClientFactory, MtlsForwarderHttpClientFactory>();
+//builder.Services.AddSingleton<IForwarderHttpClientFactory, MtlsForwarderHttpClientFactory>();
 
 // HTTP clients
-builder.Services.AddHttpClient("jwks");
-builder.Services.AddHttpClient("introspection");
+//builder.Services.AddHttpClient("jwks");
+//builder.Services.AddHttpClient("introspection");
 
+//Auth Services
+//builder.Services.AddScoped<IJwksProvider, JwksProvider>();
+//builder.Services.AddScoped<IIntrospectionClient, IntrospectionClient>();
+builder.Services.AddScoped<ITokenAuthenticator, TokenAuthenticator>();
+
+builder.Services.AddHttpClient<IJwksProvider, JwksProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+    });
+
+builder.Services.AddHttpClient<IIntrospectionClient, IntrospectionClient>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+    });
+
+// OpenTelemetry
 builder.Services.AddOpenTelemetry()
     .ConfigureResource(r => r.AddService("Gateway", serviceVersion: "1.0.0"))
     .WithMetrics(m => m
@@ -40,13 +58,6 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(t => t
         .AddAspNetCoreInstrumentation(o => { o.RecordException = true; })
         .AddHttpClientInstrumentation());
-// .UseConsoleExporter();  // uncomment if you want console output
-
-
-// Auth services
-builder.Services.AddSingleton<IJwksProvider, JwksProvider>();
-builder.Services.AddSingleton<IIntrospectionClient, IntrospectionClient>();
-builder.Services.AddSingleton<ITokenAuthenticator, TokenAuthenticator>();
 
 // Authorization policies
 builder.Services.AddSingleton<IAuthorizationHandler, ScopeAuthorizationHandler>();
@@ -66,14 +77,39 @@ builder.Services.AddAuthorization(opt =>
     });
 });
 
-// YARP from config
-builder.Services.AddReverseProxy().LoadFromConfig(cfg.GetSection("ReverseProxy"));
+// CORS
+builder.Services.AddCors(opt =>
+{
+    opt.AddPolicy("Nuxt", p => p
+        .WithOrigins("https://localhost:3000", "http://localhost:3000")
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials());
+});
+
+// Health checks
+builder.Services.AddHealthChecks();
+
+// YARP Reverse Proxy
+
+builder.Services.AddReverseProxy()
+    .LoadFromConfig(cfg.GetSection("ReverseProxy"))
+    .ConfigureHttpClient((context, handler) =>
+    {
+        // Don't follow redirects - let browser handle them
+        handler.AllowAutoRedirect = false;
+    });
+
+// BUILD APPLICATION
 
 var app = builder.Build();
-var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Gateway.RequestScope");
+var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Gateway");
+
+// MIDDLEWARE PIPELINE
 
 app.UseHttpsRedirection();
 
+// Security headers
 app.Use(async (ctx, next) =>
 {
     ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
@@ -82,77 +118,112 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-// If you front Nuxt from a different origin:
-builder.Services.AddCors(opt =>
-{
-    opt.AddPolicy("Nuxt", p => p
-        .WithOrigins("https://nuxt.example.com")
-        .AllowAnyHeader()
-        .AllowAnyMethod()
-        .AllowCredentials());
-});
+// CORS
 app.UseCors("Nuxt");
 
-
-// Auth middleware: validate Authorization Bearer before proxying
+// Simple request logging
 app.Use(async (ctx, next) =>
 {
-    // Allow /auth/* to flow without Gateway auth (AuthServer handles its own)
-    var path = ctx.Request.Path.Value ?? "";
-    var isAuthPath = path.StartsWith("/auth/", StringComparison.OrdinalIgnoreCase);
+    logger.LogInformation("Gateway: {Method} {Path}{QueryString}",
+        ctx.Request.Method,
+        ctx.Request.Path,
+        ctx.Request.QueryString);
 
-    if (!isAuthPath)
+    await next();
+
+    logger.LogInformation("Gateway: Response {Status} for {Path}",
+        ctx.Response.StatusCode,
+        ctx.Request.Path);
+});
+
+// Test endpoint - bypass all auth
+app.MapGet("/test-token", async (HttpContext ctx, IConfiguration config) =>
+{
+    var token = ctx.Request.Headers.Authorization.ToString().Replace("Bearer ", "");
+
+    var authenticator = ctx.RequestServices.GetRequiredService<ITokenAuthenticator>();
+    var result = await authenticator.AuthenticateAsync(token, ctx.RequestAborted);
+
+    return Results.Ok(new
     {
-        var authz = ctx.Request.Headers.Authorization.ToString();
-        var token = authz.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
-            ? authz.Substring("Bearer ".Length).Trim()
-            : null;
+        Success = result.ok,
+        Source = result.source,
+        Error = result.error,
+        HasPrincipal = result.principal != null,
+        Claims = result.principal?.Claims.Select(c => new { c.Type, c.Value }).ToList()
+    });
+});
 
-        if (string.IsNullOrEmpty(token))
-        {
-            ctx.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-            await ctx.Response.WriteAsJsonAsync(new { error = "missing_bearer" });
-            return;
-        }
+// Auth middleware: validate Authorization Bearer ONLY for /api/** routes
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path.Value ?? "";
 
-        var authenticator = ctx.RequestServices.GetRequiredService<ITokenAuthenticator>();
-        var (ok, principal, source, err) = await authenticator.AuthenticateAsync(token!, ctx.RequestAborted);
-        if (!ok || principal is null)
-        {
-            ctx.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-            await ctx.Response.WriteAsJsonAsync(new { error = "invalid_token", reason = err });
-            return;
-        }
+    // These paths are PUBLIC (no Bearer token required):
+    // - /connect/** (OAuth endpoints use cookies, not Bearer tokens)
+    // - /Account/** (login/enrollment pages)
+    // - /onboarding/** (passwordless entry points)
+    // - /.well-known/** (discovery endpoints)
+    // - /health/** (health checks)
+    var isPublicPath = path.StartsWith("/connect", StringComparison.OrdinalIgnoreCase) ||
+                       path.StartsWith("/Account", StringComparison.OrdinalIgnoreCase) ||
+                       path.StartsWith("/onboarding", StringComparison.OrdinalIgnoreCase) ||
+                       path.StartsWith("/.well-known", StringComparison.OrdinalIgnoreCase) ||
+                       path.StartsWith("/health", StringComparison.OrdinalIgnoreCase);
 
-        if (string.IsNullOrEmpty(token))
-        {
-            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await ctx.Response.WriteAsJsonAsync(new { title = "unauthorized", detail = "missing_bearer", requestId = ctx.TraceIdentifier });
-            return;
-        }
-
-        // Set user and mark source
-        ctx.User = principal;
-        ctx.Request.Headers["X-Auth-Source"] = source;
-        ForwardingTransforms.AddForwardedIdentityHeaders(ctx);
+    if (isPublicPath)
+    {
+        // Skip Bearer token validation - pass through immediately
+        await next();
+        return;
     }
+
+    // For /api/** routes, require Bearer token
+    var authz = ctx.Request.Headers.Authorization.ToString();
+    var token = authz.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+        ? authz.Substring("Bearer ".Length).Trim()
+        : null;
+
+    if (string.IsNullOrEmpty(token))
+    {
+        ctx.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { error = "missing_bearer" });
+        return;
+    }
+
+    var authenticator = ctx.RequestServices.GetRequiredService<ITokenAuthenticator>();
+    var (ok, principal, source, err) = await authenticator.AuthenticateAsync(token, ctx.RequestAborted);
+
+    if (!ok || principal is null)
+    {
+        ctx.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { error = "invalid_token", reason = err });
+        return;
+    }
+
+    // Set user and mark source
+    ctx.User = principal;
+    ctx.Request.Headers["X-Auth-Source"] = source;
+    ForwardingTransforms.AddForwardedIdentityHeaders(ctx);
 
     await next();
 });
 
+// Rate limiting middleware
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path.Value ?? "";
     var limiter = ctx.RequestServices.GetRequiredService<IRedisRateLimiter>();
-    var cfgRL = ctx.RequestServices.GetRequiredService<IConfiguration>().GetSection("RateLimiting");
+    var cfgRL = cfg.GetSection("RateLimiting");
 
-    // 1) Rate-limit /auth/* (global)
-    if (path.StartsWith("/auth/", StringComparison.OrdinalIgnoreCase))
+    // 1) Rate-limit /connect/* (global)
+    if (path.StartsWith("/connect/", StringComparison.OrdinalIgnoreCase))
     {
         var win = TimeSpan.FromSeconds(cfgRL.GetValue("AuthWindowSeconds", 60));
         var max = cfgRL.GetValue("AuthMax", 60);
         var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var key = $"rl:auth:{ip}";
+
         if (await limiter.ShouldLimitAsync(key, max, win, ctx.RequestAborted))
         {
             ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -162,13 +233,14 @@ app.Use(async (ctx, next) =>
         }
     }
 
-    // 2) Rate-limit /api/onboarding/identify (abuse-sensitive)
-    if (path.Equals("/api/onboarding/identify", StringComparison.OrdinalIgnoreCase))
+    // 2) Rate-limit /onboarding/identify (abuse-sensitive)
+    if (path.Equals("/onboarding/identify", StringComparison.OrdinalIgnoreCase))
     {
         var win = TimeSpan.FromSeconds(cfgRL.GetValue("IdentifyWindowSeconds", 300));
         var max = cfgRL.GetValue("IdentifyMax", 20);
         var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var key = $"rl:identify:{ip}";
+
         if (await limiter.ShouldLimitAsync(key, max, win, ctx.RequestAborted))
         {
             ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -181,10 +253,7 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-
-// Authorization after we have a principal (YARP respects endpoint metadata)
-app.UseAuthorization();
-
+// Request logging scope
 app.Use(async (ctx, next) =>
 {
     using (logger.BeginScope(new Dictionary<string, object?>
@@ -199,18 +268,17 @@ app.Use(async (ctx, next) =>
     }
 });
 
-
-// Map YARP (adds endpoint metadata from config; we attach route-level auth via policies)
+// Map YARP reverse proxy
 app.MapReverseProxy(proxyPipeline =>
 {
     // Per-request transform hook (add sanitized headers, strip hop-by-hop)
     proxyPipeline.Use((ctx, nxt) =>
     {
-        // ensure a request id
+        // Ensure a request id
         if (!ctx.Request.Headers.ContainsKey("X-Request-Id"))
             ctx.Request.Headers["X-Request-Id"] = ctx.TraceIdentifier;
 
-        // remove hop-by-hop headers
+        // Remove hop-by-hop headers
         ctx.Request.Headers.Remove("Connection");
         ctx.Request.Headers.Remove("Keep-Alive");
         ctx.Request.Headers.Remove("Proxy-Authenticate");
@@ -226,13 +294,14 @@ app.MapReverseProxy(proxyPipeline =>
 
 // Health endpoints
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+
 app.MapGet("/health/ready", async (IConnectionMultiplexer mux) =>
 {
     try
     {
         var db = mux.GetDatabase();
         await db.PingAsync();
-        return Results.Ok(new { status = "ready" });
+        return Results.Ok(new { status = "ready", redis = "connected" });
     }
     catch (Exception ex)
     {
