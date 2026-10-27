@@ -73,13 +73,15 @@ public class OnboardingController(
     /// <summary>
     /// Manager login (used by AuthServer to validate credentials)
     /// </summary>
-    [HttpGet("manager-login")]
+    [HttpPost("manager-login")]
     [AllowAnonymous]
     public async Task<IActionResult> ManagerLogin(
-        [FromQuery] string login,
-        [FromQuery] string password,
+        [FromBody] ManagerLoginRequest request,
         CancellationToken ct)
     {
+        var login = request.Login;
+        var password = request.Password;
+
         log.LogInformation("Manager login request for {Login}", login);
 
         var manager = await db.Managers
@@ -276,3 +278,5 @@ public class OnboardingController(
 }
 
 public record BadgeApprovalRequest(bool Approved);
+
+public record ManagerLoginRequest(string Login, string Password);

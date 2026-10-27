@@ -86,11 +86,12 @@ public class LoginModel : PageModel
             try
             {
                 var httpClient = _httpClientFactory.CreateClient("ResourceApiDirect");
-                var loginUrl = $"/onboarding/manager-login?login={Uri.EscapeDataString(Input.Username)}&password={Uri.EscapeDataString(Input.Password)}";
+                // Credentials go in the POST body so they never appear in a URL or request log
+                _logger.LogInformation("Calling ResourceAPI manager-login for {Username}", Input.Username);
 
-                _logger.LogInformation("Calling ResourceAPI: {Url}", loginUrl);
-
-                var response = await httpClient.GetAsync(loginUrl);
+                var response = await httpClient.PostAsJsonAsync(
+                    "/onboarding/manager-login",
+                    new ManagerLoginRequest(Input.Username, Input.Password));
 
                 if (response.IsSuccessStatusCode)
                 {
@@ -153,6 +154,8 @@ public class LoginModel : PageModel
         ErrorMessage = "Invalid username or password.";
         return Page();
     }
+
+    private record ManagerLoginRequest(string Login, string Password);
 
     private record ManagerLoginResult(bool Authenticated, Guid? UserId, Guid? ManagerId);
 }
