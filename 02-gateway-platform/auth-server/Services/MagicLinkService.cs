@@ -39,7 +39,9 @@ public sealed class MagicLinkService : IMagicLinkService
         // one-time use
         await db.KeyDeleteAsync(key);
 
-        var doc = JsonSerializer.Deserialize<VerifySessionPayload>(json!, _json);
+        // Explicit string conversion: RedisValue also converts to ReadOnlyMemory<byte>,
+        // which C# 14 span conversions make ambiguous with the string overload (CS0121).
+        var doc = JsonSerializer.Deserialize<VerifySessionPayload>((string)json!, _json);
         return doc is null ? (false, Guid.Empty) : (true, doc.TempUserId);
     }
 
