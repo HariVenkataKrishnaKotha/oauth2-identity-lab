@@ -4,14 +4,50 @@
     Layout = "/Pages/Shared/_Layout.cshtml";
     ViewData["Title"] = "Create your account";
 }
-<h2>Create your account</h2>
-<form method="post">
-    <div><label>Email (username)</label><input type="email" name="Email" required /></div>
-    <div><label>Password</label><input type="password" name="Password" required /></div>
-    <button type="submit">Save & Continue</button>
-    <input type="hidden" name="ReturnUrl" value="@Model.ReturnUrl" />
-</form>
-@if (!string.IsNullOrEmpty(Model.Error))
-{
-    <p style="color:red">@Model.Error</p>
-}
+
+<div style="max-width: 400px; margin: 50px auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px;">
+    <h2 style="margin-bottom: 20px;">Create your account</h2>
+    <p style="margin-bottom: 20px; color: #666;">Please set up your email and password to continue.</p>
+
+    @if (!string.IsNullOrEmpty(Model.Error))
+    {
+        <div style="color: #d32f2f; margin-bottom: 15px; padding: 10px; background: #ffebee; border: 1px solid #ffcdd2; border-radius: 4px;">
+            @Model.Error
+        </div>
+    }
+
+    <form method="post">
+        @* ✅ CRITICAL: Add antiforgery token *@
+        @Html.AntiForgeryToken()
+
+        <div style="margin-bottom: 15px;">
+            <label for="Email" style="display: block; margin-bottom: 5px; font-weight: 500;">Email (username)</label>
+            <input id="Email"
+                   name="Email"
+                   type="email"
+                   value="@Model.Email"
+                   required
+                   style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="your.email@example.com" />
+        </div>
+
+        <div style="margin-bottom: 15px;">
+            <label for="Password" style="display: block; margin-bottom: 5px; font-weight: 500;">Password</label>
+            <input id="Password"
+                   name="Password"
+                   type="password"
+                   required
+                   minlength="8"
+                   style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="At least 8 characters" />
+            <small style="color: #666; font-size: 12px;">Must be at least 8 characters</small>
+        </div>
+
+        <input type="hidden" name="ReturnUrl" value="@Model.ReturnUrl" />
+
+        <button type="submit"
+                style="width: 100%; padding: 12px; background: #1976d2; color: white; border: none; border-radius: 4px; font-size: 16px; font-weight: 500; cursor: pointer;">
+            Save &amp; Continue
+        </button>
+    </form>
+</div>

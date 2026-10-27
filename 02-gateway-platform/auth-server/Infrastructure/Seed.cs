@@ -1,5 +1,7 @@
-﻿using AuthServer.Identity;
+﻿using AuthServer.Data;
+using AuthServer.Identity;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.DependencyInjection;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -7,125 +9,130 @@ namespace AuthServer.Infrastructure;
 
 public static class Seed
 {
-    public static async Task InitializeAsync(
-        IServiceProvider sp,
-        string issuer,
-        CancellationToken ct = default)
+    public static async Task InitializeAsync(IServiceProvider services, string issuer)
     {
-        using var scope = sp.CreateScope();
-        var roleMgr = scope.ServiceProvider.GetRequiredService<RoleManager<ApplicationRole>>();
-        var userMgr = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        var appMgr = scope.ServiceProvider.GetRequiredService<IOpenIddictApplicationManager>();
-        var scopeMgr = scope.ServiceProvider.GetRequiredService<IOpenIddictScopeManager>();
+        using var scope = services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-        // 1) Roles
-        foreach (var r in new[] { "Onboardee", "Manager", "Admin" })
-        {
-            if (!await roleMgr.RoleExistsAsync(r))
-                await roleMgr.CreateAsync(new ApplicationRole { Name = r, NormalizedName = r.ToUpperInvariant() });
-        }
+        await SeedRolesAsync(scope.ServiceProvider);
+        await SeedClientsAsync(scope.ServiceProvider, issuer);
+        await SeedScopesAsync(scope.ServiceProvider);
+    }
 
-        // 2) (Optional) Seed a test manager user (change in prod)
-        var managerEmail = "manager@example.com";
-        var existing = await userMgr.FindByEmailAsync(managerEmail);
-        if (existing is null)
+    private static async Task SeedRolesAsync(IServiceProvider services)
+    {
+        var roleManager = services.GetRequiredService<RoleManager<ApplicationRole>>();
+
+        string[] roles = { "Manager", "Onboardee" };
+
+        foreach (var roleName in roles)
         {
-            var user = new ApplicationUser
+            if (!await roleManager.RoleExistsAsync(roleName))
             {
-                Id = Guid.NewGuid(),
-                Email = managerEmail,
-                UserName = managerEmail,
-                EmailConfirmed = true
-            };
-            var result = await userMgr.CreateAsync(user, "P@ssw0rd!123");
-            if (result.Succeeded)
-                await userMgr.AddToRoleAsync(user, "Manager");
-        }
-
-        // 3) Scopes
-        async Task EnsureScope(string name, string? display = null)
-        {
-            if (await scopeMgr.FindByNameAsync(name, ct) is null)
-            {
-                await scopeMgr.CreateAsync(new OpenIddictScopeDescriptor
-                {
-                    Name = name,
-                    DisplayName = display ?? name
-                }, ct);
+                await roleManager.CreateAsync(new ApplicationRole { Name = roleName });
             }
         }
-        await EnsureScope(Scopes.OpenId, "OpenID");
-        await EnsureScope(Scopes.Email, "Email");
-        await EnsureScope(Scopes.Profile, "Profile");
-        await EnsureScope(Scopes.OfflineAccess, "Offline access");
-        await EnsureScope("onboarding.read", "Onboarding read");
-        await EnsureScope("onboarding.write", "Onboarding write");
+    }
 
-        // 4) Nuxt SSR public client (Authorization Code + PKCE)
-        if (await appMgr.FindByClientIdAsync("nuxt-ssr", ct) is null)
+    private static async Task SeedClientsAsync(IServiceProvider services, string issuer)
+    {
+        var manager = services.GetRequiredService<IOpenIddictApplicationManager>();
+
+        // Nuxt SSR Client (Authorization Code + PKCE)
+        var nuxtClient = await manager.FindByClientIdAsync("nuxt-ssr");
+        if (nuxtClient is null)
         {
-            await appMgr.CreateAsync(new OpenIddictApplicationDescriptor
+            await manager.CreateAsync(new OpenIddictApplicationDescriptor
             {
                 ClientId = "nuxt-ssr",
-                ConsentType = ConsentTypes.Implicit, // no consent screen for first pass (adjust later)
-                DisplayName = "Nuxt Frontend",
-                ClientType = ClientTypes.Public,
+                ClientType = ClientTypes.Public, // No client secret for public clients
+                DisplayName = "Nuxt SSR Application",
+
+                // ✅ CRITICAL: Redirect URIs
                 RedirectUris =
                 {
-                    new Uri("https://nuxt.example.com/callback") // CHANGE
+                    new Uri("https://localhost:3000/auth/callback"),
+                    new Uri("http://localhost:3000/auth/callback")
                 },
+
                 PostLogoutRedirectUris =
                 {
-                    new Uri("https://nuxt.example.com/logout-callback") // CHANGE
+                    new Uri("https://localhost:3000"),
+                    new Uri("http://localhost:3000")
                 },
+
+                // ✅ CRITICAL: Permissions
                 Permissions =
                 {
-                    // Endpoint permissions (7.x)
-                    OpenIddictConstants.Permissions.Endpoints.Authorization,
-                    OpenIddictConstants.Permissions.Endpoints.Token,
-                    OpenIddictConstants.Permissions.Endpoints.Revocation,
-                    OpenIddictConstants.Permissions.Endpoints.EndSession,
-                    // (Public SPA/SSR typically should NOT get Introspection)
-                
-                    // Grant types
-                    OpenIddictConstants.Permissions.GrantTypes.AuthorizationCode,
-                    OpenIddictConstants.Permissions.GrantTypes.RefreshToken,
-                
-                    // Response types
-                    OpenIddictConstants.Permissions.ResponseTypes.Code,
-                
-                    // Scope permissions:
-                    // NOTE: "openid" & "offline_access" DON'T need explicit permission entries in 7.x docs.
-                    OpenIddictConstants.Permissions.Scopes.Email,
-                    OpenIddictConstants.Permissions.Scopes.Profile,
-                    OpenIddictConstants.Permissions.Prefixes.Scope + "onboarding.read",
-                    OpenIddictConstants.Permissions.Prefixes.Scope + "onboarding.write"
-                },
-                                Requirements =
-                {
-                    OpenIddictConstants.Requirements.Features.ProofKeyForCodeExchange
-                }
+                    Permissions.Endpoints.Authorization,
+                    Permissions.Endpoints.Token,
+                    Permissions.Endpoints.Revocation,
+                    Permissions.Endpoints.EndSession,
 
-            }, ct);
+                    Permissions.GrantTypes.AuthorizationCode,
+                    Permissions.GrantTypes.RefreshToken,
+
+                    Permissions.ResponseTypes.Code,
+                    
+                    // ✅ Scopes
+                    Permissions.Prefixes.Scope + Scopes.OpenId,
+                    Permissions.Prefixes.Scope + Scopes.Email,
+                    Permissions.Prefixes.Scope + Scopes.Profile,
+                    Permissions.Prefixes.Scope + Scopes.OfflineAccess,
+                    Permissions.Prefixes.Scope + "onboarding.read",
+                    Permissions.Prefixes.Scope + "onboarding.write"
+                },
+
+                // ✅ CRITICAL: PKCE requirement
+                Requirements =
+                {
+                    Requirements.Features.ProofKeyForCodeExchange
+                }
+            });
         }
 
-        // 5) YARP Gateway confidential client (for future use)
-        if (await appMgr.FindByClientIdAsync("yarp-gateway", ct) is null)
+        // Gateway Client (for introspection)
+        var gatewayClient = await manager.FindByClientIdAsync("yarp-gateway");
+        if (gatewayClient is null)
         {
-            await appMgr.CreateAsync(new OpenIddictApplicationDescriptor
+            await manager.CreateAsync(new OpenIddictApplicationDescriptor
             {
                 ClientId = "yarp-gateway",
-                ClientSecret = "dev-only-change-me",
-                DisplayName = "YARP Gateway",
+                ClientSecret = "dev-only-change-me", // Use a real secret in production!
                 ClientType = ClientTypes.Confidential,
+                DisplayName = "YARP Gateway",
                 Permissions =
                 {
-                    Permissions.Endpoints.Token,
                     Permissions.Endpoints.Introspection,
-                    Permissions.GrantTypes.ClientCredentials,
-                    "onboarding.read"
+                    Permissions.Endpoints.Revocation
                 }
-            }, ct);
+            });
+        }
+    }
+
+    private static async Task SeedScopesAsync(IServiceProvider services)
+    {
+        var manager = services.GetRequiredService<IOpenIddictScopeManager>();
+
+        var scopes = new[]
+        {
+            new { Name = "onboarding.read", DisplayName = "Read onboarding data", Description = "Allows reading onboarding information" },
+            new { Name = "onboarding.write", DisplayName = "Write onboarding data", Description = "Allows modifying onboarding information" }
+        };
+
+        foreach (var scope in scopes)
+        {
+            var existingScope = await manager.FindByNameAsync(scope.Name);
+            if (existingScope is null)
+            {
+                await manager.CreateAsync(new OpenIddictScopeDescriptor
+                {
+                    Name = scope.Name,
+                    DisplayName = scope.DisplayName,
+                    Description = scope.Description,
+                    Resources = { "resource-api" }
+                });
+            }
         }
     }
 }

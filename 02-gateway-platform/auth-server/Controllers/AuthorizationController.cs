@@ -1,5 +1,6 @@
 ﻿using AuthServer.Identity;
 using Microsoft.AspNetCore;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -14,55 +15,201 @@ namespace AuthServer.Controllers;
 public class AuthorizationController : ControllerBase
 {
     private readonly UserManager<ApplicationUser> _users;
-    public AuthorizationController(UserManager<ApplicationUser> users) => _users = users;
+    private readonly ILogger<AuthorizationController> _logger;
+
+    public AuthorizationController(
+        UserManager<ApplicationUser> users,
+        ILogger<AuthorizationController> logger)
+    {
+        _users = users;
+        _logger = logger;
+    }
 
     [HttpGet("/connect/authorize")]
-    [Authorize] // must be signed in (cookie)
+    [HttpPost("/connect/authorize")]
+    [Authorize]
     public async Task<IActionResult> AuthorizeAsync()
     {
-        var request = HttpContext.GetOpenIddictServerRequest()
-            ?? throw new InvalidOperationException("OIDC request missing.");
+        var request = HttpContext.GetOpenIddictServerRequest();
 
-        var user = await _users.GetUserAsync(User) ?? throw new InvalidOperationException("User missing.");
+        if (request is null)
+        {
+            _logger.LogError("OpenIddict request is null");
+            return BadRequest(new
+            {
+                error = "invalid_request",
+                error_description = "The OpenID Connect request cannot be retrieved."
+            });
+        }
+
+        _logger.LogInformation("Authorization request - ClientId: {ClientId}, ResponseType: {ResponseType}",
+            request.ClientId, request.ResponseType);
+
+        if (string.IsNullOrEmpty(request.ClientId))
+        {
+            return BadRequest(new
+            {
+                error = "invalid_request",
+                error_description = "The mandatory 'client_id' parameter is missing."
+            });
+        }
+
+        var user = await _users.GetUserAsync(User);
+        if (user is null)
+        {
+            return Challenge();
+        }
+
         var roles = await _users.GetRolesAsync(user);
 
-        // Build the principal used by OpenIddict to mint the code/tokens
         var claims = new List<Claim>
         {
             new(Claims.Subject, user.Id.ToString()),
             new(Claims.Name, user.UserName ?? user.Email ?? user.Id.ToString())
         };
 
-        foreach (var r in roles) claims.Add(new Claim(Claims.Role, r));
+        foreach (var r in roles)
+            claims.Add(new Claim(Claims.Role, r));
 
         if (roles.Contains("Onboardee") && user.OnboardId is Guid oid)
             claims.Add(new Claim("onboard_id", oid.ToString()));
 
         if (roles.Contains("Manager"))
-            claims.Add(new Claim("perm", "badge_approve")); // fine-grained permission
+            claims.Add(new Claim("perm", "badge_approve"));
 
         var identity = new ClaimsIdentity(claims, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
         var principal = new ClaimsPrincipal(identity);
 
-        // Scopes — honor client request but enforce least privilege
         var allowed = new HashSet<string>
         {
-            Scopes.OpenId, Scopes.Profile, Scopes.Email, Scopes.OfflineAccess,
-            "onboarding.read", "onboarding.write"
+            Scopes.OpenId,
+            Scopes.Profile,
+            Scopes.Email,
+            Scopes.OfflineAccess,
+            "onboarding.read",
+            "onboarding.write"
         };
-        principal.SetScopes(request.GetScopes().Where(allowed.Contains));
 
-        // Optional: map scopes → resources (APIs)
+        principal.SetScopes(request.GetScopes().Where(allowed.Contains));
         principal.SetResources("resource-api");
 
-        // Mark which claims go into which tokens
         principal.SetDestinations(static claim => claim.Type switch
         {
-            Claims.Name or Claims.Subject or Claims.Role => new[] { Destinations.AccessToken, Destinations.IdentityToken },
-            "onboard_id" or "perm" => new[] { Destinations.AccessToken },
-            _ => new[] { Destinations.AccessToken }
+            Claims.Name or Claims.Subject or Claims.Role =>
+                new[] { Destinations.AccessToken, Destinations.IdentityToken },
+            "onboard_id" or "perm" =>
+                new[] { Destinations.AccessToken },
+            _ =>
+                new[] { Destinations.AccessToken }
         });
 
         return SignIn(principal, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
     }
+
+    // Token endpoint handler
+    [HttpPost("/connect/token")]
+    [Produces("application/json")]
+    public async Task<IActionResult> TokenAsync()
+    {
+        var request = HttpContext.GetOpenIddictServerRequest();
+
+        if (request is null)
+        {
+            return BadRequest(new
+            {
+                error = "invalid_request",
+                error_description = "The OpenID Connect request cannot be retrieved."
+            });
+        }
+
+        _logger.LogInformation("Token request - GrantType: {GrantType}, ClientId: {ClientId}",
+            request.GrantType, request.ClientId);
+
+        ClaimsPrincipal principal;
+
+        // Handle authorization_code grant
+        if (request.IsAuthorizationCodeGrantType())
+        {
+            // Retrieve the claims principal from the authorization code
+            principal = (await HttpContext.AuthenticateAsync(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme)).Principal!;
+
+            if (principal is null)
+            {
+                return BadRequest(new
+                {
+                    error = "invalid_grant",
+                    error_description = "The authorization code is invalid or expired."
+                });
+            }
+        }
+        // Handle refresh_token grant
+        else if (request.IsRefreshTokenGrantType())
+        {
+            // Retrieve the claims principal from the refresh token
+            principal = (await HttpContext.AuthenticateAsync(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme)).Principal!;
+
+            if (principal is null)
+            {
+                return BadRequest(new
+                {
+                    error = "invalid_grant",
+                    error_description = "The refresh token is invalid or expired."
+                });
+            }
+
+            // Optionally refresh user claims from database
+            var userId = principal.GetClaim(Claims.Subject);
+            if (!string.IsNullOrEmpty(userId))
+            {
+                var user = await _users.FindByIdAsync(userId);
+                if (user is not null)
+                {
+                    var roles = await _users.GetRolesAsync(user);
+
+                    var claims = new List<Claim>
+                    {
+                        new(Claims.Subject, user.Id.ToString()),
+                        new(Claims.Name, user.UserName ?? user.Email ?? user.Id.ToString())
+                    };
+
+                    foreach (var r in roles)
+                        claims.Add(new Claim(Claims.Role, r));
+
+                    if (roles.Contains("Onboardee") && user.OnboardId is Guid oid)
+                        claims.Add(new Claim("onboard_id", oid.ToString()));
+
+                    if (roles.Contains("Manager"))
+                        claims.Add(new Claim("perm", "badge_approve"));
+
+                    var identity = new ClaimsIdentity(claims, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+                    principal = new ClaimsPrincipal(identity);
+
+                    principal.SetScopes(request.GetScopes());
+                    principal.SetResources("resource-api");
+
+                    principal.SetDestinations(static claim => claim.Type switch
+                    {
+                        Claims.Name or Claims.Subject or Claims.Role =>
+                            new[] { Destinations.AccessToken, Destinations.IdentityToken },
+                        "onboard_id" or "perm" =>
+                            new[] { Destinations.AccessToken },
+                        _ =>
+                            new[] { Destinations.AccessToken }
+                    });
+                }
+            }
+        }
+        else
+        {
+            return BadRequest(new
+            {
+                error = "unsupported_grant_type",
+                error_description = "The specified grant type is not supported."
+            });
+        }
+
+        // Return the access token
+        return SignIn(principal, OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
 }
