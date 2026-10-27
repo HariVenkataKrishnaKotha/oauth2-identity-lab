@@ -174,32 +174,6 @@ using (var scope = app.Services.CreateScope())
 app.UseHttpsRedirection();
 app.UseStaticFiles();
 
-
-// Temporary debug logging
-app.Use(async (context, next) =>
-{
-    if (context.Request.Path == "/Account/Login" && context.Request.Method == "POST")
-    {
-        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-
-        // Log form data
-        context.Request.EnableBuffering();
-        var form = await context.Request.ReadFormAsync();
-
-        logger.LogInformation("=== LOGIN FORM DEBUG ===");
-        logger.LogInformation("Form keys: {Keys}", string.Join(", ", form.Keys));
-
-        foreach (var key in form.Keys)
-        {
-            logger.LogInformation("Form[{Key}] = {Value}", key, form[key]);
-        }
-
-        context.Request.Body.Position = 0;
-    }
-
-    await next();
-});
-
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
