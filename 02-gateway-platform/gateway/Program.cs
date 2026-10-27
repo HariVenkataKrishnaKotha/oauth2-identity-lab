@@ -158,29 +158,37 @@ app.MapGet("/test-token", async (HttpContext ctx, IConfiguration config) =>
 // including everything the catch-all "api-routes" route sends to
 // resource-api, must carry a valid access token.
 //
-// Exact matches only:
+// Exact matches only (case-insensitive). Keep this list in sync with the
+// "auth" routes in appsettings.json: any path not listed here falls through
+// to the catch-all and needs a token.
+// - /connect/authorize, /connect/token, /connect/introspect,
+//   /connect/userinfo: OpenIddict endpoints that authenticate the caller
+//   themselves (cookie, client credentials or PKCE, or their own token check).
+// - /Account/Login, /Account/Enroll: auth-server Razor pages (cookie-based).
+//   Both post back to the same path; neither uses sub-paths or static
+//   assets under /Account/.
 // - /onboarding/identify, /onboarding/magic: auth-server passwordless entry
 //   points. They run before the onboardee has any token (identify checks
 //   last name + DOB, magic redeems the one-time link and sets the cookie).
 // - /health/live, /health/ready: the gateway's own probes.
 string[] publicExactPaths =
 [
+    "/connect/authorize",
+    "/connect/token",
+    "/connect/introspect",
+    "/connect/userinfo",
+    "/Account/Login",
+    "/Account/Enroll",
     "/onboarding/identify",
     "/onboarding/magic",
     "/health/live",
     "/health/ready"
 ];
 
-// Segment-bounded prefixes for auth-server namespaces that authenticate
-// callers themselves (cookie, client credentials or PKCE), so a Bearer
-// token cannot be required here:
-// - /connect/ (authorize, token, introspect, userinfo)
-// - /Account/ (login and enrollment pages)
-// - /.well-known/ (discovery document and JWKS)
+// Segment-bounded prefix: everything under /.well-known/ is public
+// discovery and JWKS data, routed to auth-server by the "well-known" route.
 string[] publicPathPrefixes =
 [
-    "/connect/",
-    "/Account/",
     "/.well-known/"
 ];
 
