@@ -155,7 +155,8 @@ app.MapGet("/test-token", async (HttpContext ctx, IConfiguration config) =>
 });
 
 // Paths the gateway lets through WITHOUT a Bearer token. Everything else,
-// including every resource-api route, must carry a valid access token.
+// including everything the catch-all "api-routes" route sends to
+// resource-api, must carry a valid access token.
 //
 // Exact matches only:
 // - /onboarding/identify, /onboarding/magic: auth-server passwordless entry
